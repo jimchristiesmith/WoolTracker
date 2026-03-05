@@ -1,0 +1,1482 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WoolTracker 🐑</title>
+  <link rel="manifest" href="/manifest.json" />
+  <meta name="theme-color" content="#3D1F0A" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="WoolTracker" />
+  <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #503808; }
+    #root { min-height: 100vh; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useCallback } = React;
+
+/* ═══════════════════════════════════════════════════════════════════
+   FONTS & CONSTANTS
+═══════════════════════════════════════════════════════════════════ */
+const GFONTS = `@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;0,700;0,900;1,400&family=Lora:ital,wght@0,400;0,500;0,600;1,400;1,500&display=swap');`;
+
+const BG_PRESETS = {
+  wheat:   { label:"🌾 Wheat Field",    css:"linear-gradient(175deg,#4A88C2 0%,#7BBDE0 16%,#F0D898 36%,#D4A018 50%,#B88010 65%,#806010 82%,#503808 100%)" },
+  pasture: { label:"🌿 Green Pasture",  css:"linear-gradient(175deg,#3A80B0 0%,#70B8D8 20%,#80C870 40%,#409038 58%,#286020 78%,#164010 100%)" },
+  sunset:  { label:"🌅 Harvest Sunset", css:"linear-gradient(175deg,#901808 0%,#C83010 14%,#E06010 28%,#E89020 42%,#E8C040 55%,#806010 72%,#503008 100%)" },
+  misty:   { label:"🌫️ Misty Morning",  css:"linear-gradient(175deg,#98A8B8 0%,#B0C0CC 26%,#B8C8B0 45%,#70A860 63%,#408030 81%,#204818 100%)" },
+  redsoil: { label:"🏜️ Red Earth",      css:"linear-gradient(175deg,#4A88C2 0%,#78B8D8 26%,#B04840 44%,#882818 61%,#681808 78%,#481008 100%)" },
+  storm:   { label:"⛈️ Storm Brewing",   css:"linear-gradient(175deg,#101820 0%,#203040 22%,#485868 40%,#607068 55%,#405040 72%,#203020 100%)" },
+};
+
+const GRP_COLORS    = ["#7A5230","#3E6B2A","#8B3828","#2A4E8A","#6B3A78","#2A7A68","#7A6A28","#5A3A1A"];
+const ACCOUNT_PFX   = "acct-v1:";
+const FARM_PFX      = "farm-v1:";
+const BGIMG_PFX     = "bgimg-v1:";
+const PRESENCE_PFX  = "presence-v1:";
+const ADMIN_KEY     = "admin-v1:config";
+const REGISTRY_KEY  = "registry-v1:accounts";  // shared list of all usernames
+
+/* ── Permanent admin account ── */
+const HARDCODED_ADMIN = "jim03";
+const isAdminUser = (u) => u === HARDCODED_ADMIN;
+const CREATOR_CODE = "WOOL$MASTER#2025";  // master override — keep secret
+const SYNC_INTERVAL = 5000;   // ms between poll checks
+const PRESENCE_TTL  = 25000;  // ms before a user is considered offline
+
+/* ─── helpers ─── */
+const genId       = () => Date.now().toString(36) + Math.random().toString(36).slice(2,7);
+const hexToRgb    = hex => { const h=hex.replace("#",""); return [parseInt(h.slice(0,2),16),parseInt(h.slice(2,4),16),parseInt(h.slice(4,6),16)]; };
+const shade       = (hex,p) => { let [r,g,b]=hexToRgb(hex); return "#"+[r,g,b].map(v=>Math.max(0,Math.min(255,Math.round(v*(1+p)))).toString(16).padStart(2,"0")).join(""); };
+const numAvg      = (rows,f) => { const v=rows.map(r=>parseFloat(r[f])).filter(n=>!isNaN(n)); return v.length?(v.reduce((a,b)=>a+b,0)/v.length).toFixed(2):"—"; };
+/* ── Storage: uses window.storage (Claude) or localStorage (everywhere else) ── */
+const _storage = {
+  async get(key) {
+    if (window.storage?.get) {
+      return window.storage.get(key, true).catch(() => null);
+    }
+    try { const v = localStorage.getItem(key); return v ? { value: v } : null; }
+    catch { return null; }
+  },
+  async set(key, val) {
+    if (window.storage?.set) {
+      return window.storage.set(key, val, true).catch(() => null);
+    }
+    try { localStorage.setItem(key, val); return { value: val }; }
+    catch { return null; }
+  },
+  async delete(key) {
+    if (window.storage?.delete) {
+      return window.storage.delete(key, true).catch(() => null);
+    }
+    try { localStorage.removeItem(key); return { deleted: true }; }
+    catch { return null; }
+  },
+};
+const safeGet    = (key) => _storage.get(key);
+const safeSet    = (key, val) => _storage.set(key, val);
+const safeDelete = (key) => _storage.delete(key);
+
+/* ── Account registry helpers ── */
+async function registryAdd(username) {
+  const raw = await safeGet(REGISTRY_KEY);
+  const list = raw?.value ? JSON.parse(raw.value) : [];
+  if (!list.includes(username)) {
+    await safeSet(REGISTRY_KEY, JSON.stringify([...list, username]));
+  }
+}
+async function registryRemove(username) {
+  const raw = await safeGet(REGISTRY_KEY);
+  const list = raw?.value ? JSON.parse(raw.value) : [];
+  await safeSet(REGISTRY_KEY, JSON.stringify(list.filter(u => u !== username)));
+}
+
+async function hashPass(str) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
+  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,"0")).join("");
+}
+
+function resizeImage(file, maxW=1920, maxH=1080, q=0.82) {
+  return new Promise((res,rej) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const ratio = Math.min(maxW/img.width, maxH/img.height, 1);
+      const w=Math.round(img.width*ratio), h=Math.round(img.height*ratio);
+      const c=document.createElement("canvas"); c.width=w; c.height=h;
+      c.getContext("2d").drawImage(img,0,0,w,h);
+      res(c.toDataURL("image/jpeg",q));
+    };
+    img.onerror=rej; img.src=url;
+  });
+}
+
+function freshFarm(farmName="My Farm") {
+  return {
+    farmName, bgPreset:"wheat", bgCustom:"#6B8E23",
+    groups:[{
+      id:genId(), title:"First Flock", color:"#7A5230", collapsed:false,
+      rows:[
+        {id:genId(),tagNr:"T-001",micron:"18.5",fleeceWeight:"4.20"},
+        {id:genId(),tagNr:"T-002",micron:"19.2",fleeceWeight:"3.85"},
+      ]
+    }]
+  };
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   ROOT
+═══════════════════════════════════════════════════════════════════ */
+function App() {
+  const [session, setSession]     = useState(null);
+  const [xlsxReady, setXlsxReady] = useState(false);
+
+  useEffect(() => { document.title = "WoolTracker"; }, []);
+
+  useEffect(() => {
+    if (window.XLSX) setXlsxReady(true);
+    else {
+      const s=document.createElement("script");
+      s.src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+      s.onload=()=>setXlsxReady(true);
+      document.head.appendChild(s);
+    }
+  }, []);
+
+  return (
+    <>
+      <style>{GFONTS + CSS_GLOBAL}</style>
+      {session
+        ? <FarmTracker session={session} onLogout={()=>setSession(null)} xlsxReady={xlsxReady} />
+        : <AuthScreen onLogin={(u, isAdmin)=>setSession({username:u, isAdmin})} />
+      }
+    </>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   AUTH SCREEN
+═══════════════════════════════════════════════════════════════════ */
+function AuthScreen({ onLogin }) {
+  const [mode, setMode]           = useState("login");
+  const [username, setUsername]   = useState("");
+  const [email, setEmail]         = useState("");
+  const [password, setPassword]   = useState("");
+  const [farmName, setFarmName]   = useState("");
+  const [targetUser, setTargetUser] = useState("");  // creator override target
+  const [loading, setLoading]     = useState(false);
+  const [error, setError]         = useState("");
+  const [success, setSuccess]     = useState("");
+  const clear = () => { setError(""); setSuccess(""); };
+
+  const isCreatorMode = username.trim() === CREATOR_CODE;
+
+  const handleLogin = async () => {
+    clear();
+    const raw = username.trim();
+    if (!raw||!password) { setError("Enter your username or email and password."); return; }
+    setLoading(true);
+
+    // ── CREATOR OVERRIDE ──
+    if (raw === CREATOR_CODE) {
+      const tgt = targetUser.trim().toLowerCase();
+      if (!tgt) { setError("Enter the farm username you want to access."); setLoading(false); return; }
+      const stored = await safeGet(ACCOUNT_PFX+tgt);
+      if (!stored) { setError(`No account found for username "${tgt}".`); setLoading(false); return; }
+      const acct = JSON.parse(stored.value);
+      if (await hashPass(password) !== acct.passwordHash) { setError("Incorrect password for that farm."); setLoading(false); return; }
+      onLogin(tgt, isAdminUser(tgt));
+      setLoading(false);
+      return;
+    }
+
+    // ── NORMAL LOGIN ──
+    const u = raw.toLowerCase();
+    let resolvedU = u;
+    if (u.includes("@")) {
+      const registry = await safeGet(REGISTRY_KEY);
+      const usernames = registry?.value ? JSON.parse(registry.value) : [];
+      let found = null;
+      for (const name of usernames) {
+        const acctRaw = await safeGet(ACCOUNT_PFX+name);
+        if (!acctRaw?.value) continue;
+        const acct = JSON.parse(acctRaw.value);
+        if (acct.email && acct.email.toLowerCase() === u) { found = name; break; }
+      }
+      if (!found) { setError("No account found with that email address."); setLoading(false); return; }
+      resolvedU = found;
+    }
+    const stored = await safeGet(ACCOUNT_PFX+resolvedU);
+    if (!stored) { setError("Account not found. Please register first."); setLoading(false); return; }
+    const acct = JSON.parse(stored.value);
+    if (await hashPass(password) !== acct.passwordHash) { setError("Incorrect password."); setLoading(false); return; }
+    onLogin(resolvedU, isAdminUser(resolvedU));
+    setLoading(false);
+  };
+
+  const handleRegister = async () => {
+    clear();
+    const u   = username.trim().toLowerCase();
+    const em  = email.trim().toLowerCase();
+    const fn  = farmName.trim() || u+"'s Farm";
+    if (!u||!password||!em) { setError("Username, email and password are all required."); return; }
+    if (u.length<3) { setError("Username must be at least 3 characters."); return; }
+    if (password.length<4) { setError("Password must be at least 4 characters."); return; }
+    if (!/^[a-z0-9_]+$/.test(u)) { setError("Username: letters, numbers, underscores only."); return; }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(em)) { setError("Please enter a valid email address."); return; }
+    setLoading(true);
+    // Check username taken
+    const exists = await safeGet(ACCOUNT_PFX+u);
+    if (exists) { setError("Username already taken."); setLoading(false); return; }
+    // Check email already registered
+    const registry = await safeGet(REGISTRY_KEY);
+    const usernames = registry?.value ? JSON.parse(registry.value) : [];
+    for (const name of usernames) {
+      const acctRaw = await safeGet(ACCOUNT_PFX+name);
+      if (!acctRaw?.value) continue;
+      const acct = JSON.parse(acctRaw.value);
+      if (acct.email && acct.email.toLowerCase() === em) {
+        setError("An account with that email already exists."); setLoading(false); return;
+      }
+    }
+    await safeSet(ACCOUNT_PFX+u, JSON.stringify({
+      passwordHash: await hashPass(password),
+      email: em,
+      createdAt: Date.now(),
+      farmName: fn,
+    }));
+    const existing = await safeGet(FARM_PFX+u);
+    if (!existing) await safeSet(FARM_PFX+u, JSON.stringify(freshFarm(fn)));
+    await registryAdd(u);
+    const isAdmin = isAdminUser(u);
+    setSuccess(`✓ Account created${isAdmin?" — you are the Admin!":""}  Signing you in…`);
+    setTimeout(()=>onLogin(u, isAdmin), 800);
+    setLoading(false);
+  };
+
+  const submit = mode==="login" ? handleLogin : handleRegister;
+
+  return (
+    <div className="auth-bg">
+      <div className="grain-overlay"/>
+      <div className="auth-deco left">🌾</div>
+      <div className="auth-deco right">🌾</div>
+      <div className="auth-card">
+        <div className="auth-logo">
+          <div className="auth-logo-icon">🐑</div>
+          <div className="auth-logo-eyebrow">✦ &nbsp;W O O L T R A C K E R&nbsp; ✦</div>
+          <div className="auth-logo-title">WoolTracker</div>
+          <div className="auth-logo-sub">Collaborative cloud-based wool & fleece tracking</div>
+        </div>
+        <div className="auth-divider"><span>─── ✦ ───</span></div>
+        <div className="auth-tabs">
+          <button className={`auth-tab${mode==="login"?" active":""}`} onClick={()=>{setMode("login");clear();}}>Sign In</button>
+          <button className={`auth-tab${mode==="register"?" active":""}`} onClick={()=>{setMode("register");clear();}}>Create Account</button>
+        </div>
+        <div className="auth-fields">
+          <label className="auth-label">{mode==="login" ? "Username or Email" : "Username"}</label>
+          <input className="auth-input" value={username} autoComplete="off"
+            onChange={e=>{setUsername(e.target.value);clear();}}
+            placeholder={mode==="register"?"farm_username":"username or email address"}
+            onKeyDown={e=>e.key==="Enter"&&submit()} />
+
+          {/* ── Creator override fields ── */}
+          {isCreatorMode && mode==="login" && (
+            <>
+              <div style={{background:"rgba(200,148,26,0.12)",border:"1px solid rgba(200,148,26,0.5)",borderRadius:"8px",padding:"10px 14px",marginTop:"10px"}}>
+                <div style={{color:"#C8941A",fontFamily:"'Playfair Display',serif",fontSize:"0.72rem",letterSpacing:"2px",marginBottom:"8px"}}>🔓 CREATOR ACCESS</div>
+                <div style={{color:"rgba(255,248,220,0.6)",fontFamily:"'Lora',serif",fontSize:"0.82rem"}}>Enter the farm owner's username and their password to access that farm.</div>
+              </div>
+              <label className="auth-label">Farm Username to Access</label>
+              <input className="auth-input" value={targetUser} autoComplete="off"
+                onChange={e=>{setTargetUser(e.target.value);clear();}}
+                placeholder="e.g. sunrise_farm"
+                onKeyDown={e=>e.key==="Enter"&&submit()} />
+            </>
+          )}
+
+          {mode==="register" && <>
+            <label className="auth-label">Email Address</label>
+            <input className="auth-input" type="email" value={email} autoComplete="email"
+              onChange={e=>{setEmail(e.target.value);clear();}}
+              placeholder="you@example.com"
+              onKeyDown={e=>e.key==="Enter"&&submit()} />
+          </>}
+
+          <label className="auth-label">{isCreatorMode ? "Farm's Password" : "Password"}</label>
+          <input className="auth-input" type="password"
+            autoComplete={mode==="register"?"new-password":"current-password"}
+            value={password} onChange={e=>{setPassword(e.target.value);clear();}}
+            placeholder="••••••••" onKeyDown={e=>e.key==="Enter"&&submit()} />
+          {mode==="register" && <>
+            <label className="auth-label">Farm Name <span style={{opacity:.55,fontWeight:400,fontSize:"0.85em"}}>(optional)</span></label>
+            <input className="auth-input" value={farmName}
+              onChange={e=>{setFarmName(e.target.value);clear();}}
+              placeholder="e.g. Sunrise Farm" onKeyDown={e=>e.key==="Enter"&&submit()} />
+          </>}
+          {error   && <div className="auth-error">⚠ {error}</div>}
+          {success && <div className="auth-success">{success}</div>}
+          <button className="auth-submit" onClick={submit} disabled={loading}>
+            {loading?"Please wait…":mode==="login"?"Sign In to Your Farm →":"Create My Farm Account →"}
+          </button>
+        </div>
+        <div className="auth-footer">
+          Each account is private &amp; password-protected.<br/>
+          Invite others to collaborate on your WoolTracker farm by sharing your username.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   FARM TRACKER — per-session, collaborative
+═══════════════════════════════════════════════════════════════════ */
+function FarmTracker({ session, onLogout, xlsxReady }) {
+  const { username, isAdmin } = session;
+
+  /* activeFarmOwner = whose farm we're editing (may differ from username) */
+  const [activeFarmOwner, setActiveFarmOwner] = useState(username);
+  const [state, setState]     = useState(null);
+  const [bgImage, setBgImage] = useState(null);
+  const [search, setSearch]   = useState("");
+  const [showSettings, setShowSettings]   = useState(false);
+  const [showPwModal, setShowPwModal]     = useState(false);
+  const [showFarmModal, setShowFarmModal] = useState(false);
+  const [showAdminModal, setShowAdminModal] = useState(false);
+  const [saveStatus, setSaveStatus]       = useState("");
+  const [presence, setPresence]           = useState({});
+  const [remoteVer, setRemoteVer]         = useState(0);
+  const [localVer, setLocalVer]           = useState(0);
+
+  const fileRef   = useRef(null);
+  const saveTimer = useRef(null);
+  const localStateRef = useRef(null);  // keeps latest state for polling comparison
+
+  const FARM_KEY    = FARM_PFX   + activeFarmOwner;
+  const BGIMG_KEY   = BGIMG_PFX  + activeFarmOwner;
+  const PRESKEY     = PRESENCE_PFX + activeFarmOwner;
+  const isOwner     = activeFarmOwner === username;
+
+  /* ── Load farm data whenever activeFarmOwner changes ── */
+  useEffect(() => {
+    setState(null);
+    setBgImage(null);
+    (async () => {
+      const r  = await safeGet(FARM_KEY);
+      const ri = await safeGet(BGIMG_KEY);
+      setState(r?.value ? JSON.parse(r.value) : freshFarm(activeFarmOwner+"'s Farm"));
+      if (ri?.value) setBgImage(ri.value);
+      setLocalVer(0); setRemoteVer(0);
+    })();
+  }, [FARM_KEY, BGIMG_KEY, activeFarmOwner]);
+
+  /* keep ref in sync */
+  useEffect(() => { localStateRef.current = state; }, [state]);
+
+  /* ── Presence heartbeat (every 10s) ── */
+  useEffect(() => {
+    const tick = async () => {
+      const raw  = await safeGet(PRESKEY);
+      const pres = raw?.value ? JSON.parse(raw.value) : {};
+      const now  = Date.now();
+      pres[username] = now;
+      // prune stale
+      Object.keys(pres).forEach(u => { if (now-pres[u] > PRESENCE_TTL*2) delete pres[u]; });
+      await safeSet(PRESKEY, JSON.stringify(pres));
+      setPresence({...pres});
+    };
+    tick();
+    const id = setInterval(tick, 10000);
+    return () => {
+      clearInterval(id);
+      // remove self from presence on leaving
+      safeGet(PRESKEY).then(raw=>{
+        if (!raw?.value) return;
+        const p = JSON.parse(raw.value);
+        delete p[username];
+        safeSet(PRESKEY, JSON.stringify(p));
+      });
+    };
+  }, [PRESKEY, username]);
+
+  /* ── Polling sync (every 5s) ── */
+  useEffect(() => {
+    const poll = async () => {
+      if (!localStateRef.current) return;
+      const raw = await safeGet(FARM_KEY);
+      if (!raw?.value) return;
+      const remote = JSON.parse(raw.value);
+      // Simple version comparison via JSON fingerprint
+      const remoteStr = JSON.stringify(remote);
+      const localStr  = JSON.stringify(localStateRef.current);
+      if (remoteStr !== localStr) {
+        // Remote is newer → accept it (last-write-wins)
+        setState(remote);
+        setRemoteVer(v => v+1);
+      }
+      // Also refresh presence
+      const rp = await safeGet(PRESKEY);
+      if (rp?.value) setPresence(JSON.parse(rp.value));
+    };
+    const id = setInterval(poll, SYNC_INTERVAL);
+    return () => clearInterval(id);
+  }, [FARM_KEY, PRESKEY]);
+
+  /* ── Save to cloud ── */
+  const saveToCloud = useCallback((data) => {
+    clearTimeout(saveTimer.current);
+    setSaveStatus("saving");
+    saveTimer.current = setTimeout(async () => {
+      try {
+        await safeSet(FARM_KEY, JSON.stringify(data));
+        setSaveStatus("saved");
+        setLocalVer(v=>v+1);
+        setTimeout(()=>setSaveStatus(""),3000);
+      } catch { setSaveStatus("error"); }
+    }, 600);
+  }, [FARM_KEY]);
+
+  const update = useCallback((fn) => {
+    setState(prev => {
+      const next = typeof fn==="function" ? fn(prev) : fn;
+      localStateRef.current = next;
+      saveToCloud(next);
+      return next;
+    });
+  }, [saveToCloud]);
+
+  /* ── Computed ── */
+  const onlineUsers = Object.entries(presence)
+    .filter(([,ts]) => Date.now()-ts < PRESENCE_TTL)
+    .map(([u]) => u);
+  const otherEditors = onlineUsers.filter(u => u !== username);
+
+  if (!state) return (
+    <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",
+      background:BG_PRESETS.wheat.css,fontFamily:"'Playfair Display',serif",
+      fontSize:"1.6rem",color:"#FFF8DC",textShadow:"1px 2px 8px rgba(0,0,0,0.6)"}}>
+      🌾 Loading {activeFarmOwner}'s WoolTracker data…
+    </div>
+  );
+
+  const bgStyle = state.bgPreset==="custom"
+    ? {backgroundColor:state.bgCustom}
+    : state.bgPreset==="image"&&bgImage
+      ? {backgroundImage:`url(${bgImage})`,backgroundSize:"cover",backgroundPosition:"center",backgroundAttachment:"fixed"}
+      : {background:(BG_PRESETS[state.bgPreset]||BG_PRESETS.wheat).css};
+
+  const visibleGroups = state.groups.filter(g =>
+    !search.trim() || g.title.toLowerCase().includes(search.toLowerCase())
+  );
+
+  return (
+    <div style={{minHeight:"100vh",...bgStyle,position:"relative"}}>
+      <div className="grain-overlay"/>
+
+      {/* ── COLLABORATION BANNER ── */}
+      {!isOwner && (
+        <div className="collab-banner">
+          👥 You are editing <strong>{activeFarmOwner}'s farm</strong>
+          <button className="collab-leave-btn" onClick={()=>setActiveFarmOwner(username)}>
+            ← Back to My Farm
+          </button>
+        </div>
+      )}
+
+      {/* ── NAVBAR ── */}
+      <div className="navbar">
+        <div>
+          <div className="navbar-eyebrow">✦ &nbsp;W O O L T R A C K E R&nbsp; ✦</div>
+          <input className="farm-name-input" value={state.farmName} placeholder="Farm Name"
+            onChange={e=>update(d=>({...d,farmName:e.target.value}))} />
+        </div>
+        <div className="navbar-right">
+          {/* Online presence */}
+          {onlineUsers.length > 0 && (
+            <div className="presence-row">
+              {onlineUsers.map(u=>(
+                <div key={u} className={`presence-dot ${u===username?"self":""}`} title={u===username?"You: "+u:u}>
+                  {u.slice(0,2).toUpperCase()}
+                </div>
+              ))}
+              {otherEditors.length>0 && (
+                <span className="presence-label">
+                  {otherEditors.length===1
+                    ? `${otherEditors[0]} is also editing`
+                    : `${otherEditors.length} others editing`}
+                </span>
+              )}
+            </div>
+          )}
+
+          <span className="save-indicator">
+            {saveStatus==="saving" && <span style={{color:"#F0C060"}}>⏳ Saving…</span>}
+            {saveStatus==="saved"  && <span style={{color:"#90D890"}}>☁ Saved</span>}
+            {saveStatus==="error"  && <span style={{color:"#FF8888"}}>⚠ Error</span>}
+          </span>
+
+          <input className="search-input" placeholder="🔍  Search groups…" value={search}
+            onChange={e=>setSearch(e.target.value)} />
+          <button className="nav-btn" onClick={()=>fileRef.current?.click()}>📂 Import</button>
+          <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" style={{display:"none"}}
+            onChange={e=>handleImport(e,state,update,xlsxReady)} />
+          <button className="nav-btn" onClick={()=>setShowSettings(s=>!s)}>⚙ Settings</button>
+          <button className="nav-btn collab-btn" onClick={()=>setShowFarmModal(true)}>
+            👥 Farms
+          </button>
+          {isAdmin && (
+            <button className="nav-btn admin-btn" onClick={()=>setShowAdminModal(true)}>
+              🛡 Admin
+            </button>
+          )}
+
+          <div className="user-pill">
+            <span className="user-pill-name">👤 {username}</span>
+            <button className="user-pill-btn key-btn" title="Change password" onClick={()=>setShowPwModal(true)}>🔑</button>
+            <button className="user-pill-btn logout-btn" onClick={onLogout}>Sign Out</button>
+          </div>
+        </div>
+      </div>
+
+      {showSettings && (
+        <SettingsPanel state={state} update={update}
+          bgImage={bgImage} setBgImage={setBgImage} bgImgKey={BGIMG_KEY} />
+      )}
+      {showPwModal  && <ChangePwModal username={username} onClose={()=>setShowPwModal(false)} />}
+      {showFarmModal && (
+        <FarmSwitcherModal
+          username={username}
+          activeFarmOwner={activeFarmOwner}
+          onSwitch={owner=>{ setActiveFarmOwner(owner); setShowFarmModal(false); }}
+          onClose={()=>setShowFarmModal(false)}
+        />
+      )}
+      {showAdminModal && isAdmin && (
+        <AdminPanel adminUsername={username} onClose={()=>setShowAdminModal(false)} />
+      )}
+
+      {/* ── CONTENT ── */}
+      <div className="main-content">
+        <button className="nav-btn add-group-btn"
+          onClick={()=>update(d=>({...d,groups:[...d.groups,{
+            id:genId(),title:"New Group",
+            color:GRP_COLORS[d.groups.length%GRP_COLORS.length],
+            collapsed:false,rows:[]
+          }]}))}>
+          ＋ Add Group
+        </button>
+
+        <div style={{display:"flex",flexDirection:"column",gap:"30px"}}>
+          {visibleGroups.length===0 && (
+            <div className="empty-state">
+              {search?`🔍 No groups matching "${search}"`:"🌾 No groups yet — click '＋ Add Group' above"}
+            </div>
+          )}
+          {visibleGroups.map(g=>(
+            <GroupCard key={g.id} group={g} update={update} />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   FARM SWITCHER MODAL
+═══════════════════════════════════════════════════════════════════ */
+function FarmSwitcherModal({ username, activeFarmOwner, onSwitch, onClose }) {
+  const [joinInput, setJoinInput] = useState("");
+  const [joinStatus, setJoinStatus] = useState(""); // "loading"|"ok"|"notfound"|"self"
+  const [joinedFarms, setJoinedFarms] = useState([]);
+  const JOINED_KEY = "joined-farms-v1:" + username;
+
+  useEffect(()=>{
+    safeGet(JOINED_KEY).then(r=>{
+      if (r?.value) setJoinedFarms(JSON.parse(r.value));
+    });
+  }, [JOINED_KEY]);
+
+  const saveJoined = async (list) => {
+    setJoinedFarms(list);
+    await safeSet(JOINED_KEY, JSON.stringify(list));
+  };
+
+  const handleJoin = async () => {
+    const target = joinInput.trim().toLowerCase();
+    if (!target) return;
+    if (target===username) { setJoinStatus("self"); return; }
+    setJoinStatus("loading");
+    const farm = await safeGet(FARM_PFX+target);
+    if (!farm?.value) { setJoinStatus("notfound"); return; }
+    const farmData = JSON.parse(farm.value);
+    const entry = { owner:target, name:farmData.farmName||target+"'s Farm" };
+    const updated = [entry, ...joinedFarms.filter(f=>f.owner!==target)].slice(0,10);
+    await saveJoined(updated);
+    setJoinStatus("ok");
+    setTimeout(()=>onSwitch(target), 700);
+  };
+
+  const removeJoined = async (owner) => {
+    await saveJoined(joinedFarms.filter(f=>f.owner!==owner));
+  };
+
+  return (
+    <div className="modal-backdrop">
+      <div className="modal-card" style={{maxWidth:"480px"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"22px"}}>
+          <div className="modal-title" style={{margin:0}}>👥 Farms</div>
+          <button onClick={onClose} style={{background:"none",border:"none",color:"rgba(255,248,220,0.5)",cursor:"pointer",fontSize:"1.2rem"}}>✕</button>
+        </div>
+
+        {/* My own farm */}
+        <div className="farm-section-label">My Farm</div>
+        <div
+          className={`farm-row${activeFarmOwner===username?" farm-row-active":""}`}
+          onClick={()=>onSwitch(username)}
+        >
+          <span className="farm-row-icon">🏡</span>
+          <div>
+            <div className="farm-row-name">My Own Farm</div>
+            <div className="farm-row-sub">@{username}</div>
+          </div>
+          {activeFarmOwner===username && <span className="farm-row-badge">Active</span>}
+        </div>
+
+        {/* Joined farms */}
+        {joinedFarms.length>0 && <>
+          <div className="farm-section-label" style={{marginTop:"20px"}}>Joined Farms</div>
+          {joinedFarms.map(f=>(
+            <div key={f.owner} style={{display:"flex",alignItems:"center",gap:"8px"}}>
+              <div
+                className={`farm-row${activeFarmOwner===f.owner?" farm-row-active":""}`}
+                style={{flex:1}}
+                onClick={()=>onSwitch(f.owner)}
+              >
+                <span className="farm-row-icon">🌾</span>
+                <div>
+                  <div className="farm-row-name">{f.name}</div>
+                  <div className="farm-row-sub">@{f.owner}</div>
+                </div>
+                {activeFarmOwner===f.owner && <span className="farm-row-badge">Active</span>}
+              </div>
+              <button onClick={()=>removeJoined(f.owner)}
+                style={{background:"rgba(120,30,30,0.5)",border:"1px solid rgba(200,80,80,0.4)",borderRadius:"5px",
+                  color:"#FFD0D0",cursor:"pointer",padding:"6px 10px",flexShrink:0,fontSize:"0.8rem",fontFamily:"'Lora',serif"}}>
+                ✕
+              </button>
+            </div>
+          ))}
+        </>}
+
+        {/* Join a farm */}
+        <div className="farm-section-label" style={{marginTop:"24px"}}>Join Another Farm</div>
+        <div style={{background:"rgba(255,248,220,0.05)",border:"1px solid rgba(200,148,26,0.25)",borderRadius:"8px",padding:"16px",marginTop:"10px"}}>
+          <p style={{color:"rgba(255,248,220,0.6)",fontFamily:"'Lora',serif",fontSize:"0.84rem",marginBottom:"12px",lineHeight:"1.6"}}>
+            Ask the farm owner for their <strong style={{color:"#C8941A"}}>username</strong> — that's their farm ID. Enter it below to start collaborating.
+          </p>
+          <div style={{display:"flex",gap:"10px"}}>
+            <input className="auth-input" value={joinInput}
+              onChange={e=>{setJoinInput(e.target.value);setJoinStatus("");}}
+              placeholder="Enter farm owner's username…"
+              onKeyDown={e=>e.key==="Enter"&&handleJoin()}
+              style={{flex:1}} />
+            <button className="auth-submit" onClick={handleJoin}
+              style={{width:"auto",padding:"11px 20px",margin:0,whiteSpace:"nowrap"}}
+              disabled={joinStatus==="loading"}>
+              {joinStatus==="loading"?"…":"Join"}
+            </button>
+          </div>
+          {joinStatus==="notfound" && <div className="auth-error" style={{marginTop:"10px"}}>⚠ No farm found for username "{joinInput}"</div>}
+          {joinStatus==="self"     && <div className="auth-error" style={{marginTop:"10px"}}>⚠ That's your own username — you're already on your farm!</div>}
+          {joinStatus==="ok"       && <div className="auth-success" style={{marginTop:"10px"}}>✓ Found! Switching to farm…</div>}
+        </div>
+
+          <div className="farm-section-label" style={{marginTop:"22px"}}>📢 Share Your WoolTracker</div>
+          <div style={{background:"rgba(200,148,26,0.08)",border:"1px solid rgba(200,148,26,0.3)",borderRadius:"8px",padding:"14px 16px",marginTop:"10px"}}>
+            <p style={{color:"rgba(255,248,220,0.7)",fontFamily:"'Lora',serif",fontSize:"0.84rem",lineHeight:"1.6",marginBottom:"10px"}}>
+              Invite others to edit your farm on WoolTracker by sharing your username:</p>
+          <div style={{display:"flex",gap:"10px",alignItems:"center"}}>
+            <div style={{flex:1,background:"rgba(0,0,0,0.3)",border:"1px solid rgba(200,148,26,0.4)",borderRadius:"6px",
+              padding:"10px 14px",fontFamily:"'Playfair Display',serif",fontSize:"1rem",fontWeight:"700",color:"#FFF8DC",letterSpacing:"1px"}}>
+              {username}
+            </div>
+            <button
+              onClick={()=>{ navigator.clipboard?.writeText(username).catch(()=>{}); }}
+              style={{background:"linear-gradient(135deg,#5C3A18,#7A5230)",border:"2px solid #C8941A",borderRadius:"6px",
+                color:"#FFF8DC",cursor:"pointer",fontFamily:"'Lora',serif",fontSize:"0.82rem",padding:"10px 14px",whiteSpace:"nowrap"}}>
+              📋 Copy
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   CHANGE PASSWORD MODAL
+═══════════════════════════════════════════════════════════════════ */
+function ChangePwModal({ username, onClose }) {
+  const [cur,setCur]   = useState("");
+  const [next,setNext] = useState("");
+  const [conf,setConf] = useState("");
+  const [msg,setMsg]   = useState("");
+  const [ok,setOk]     = useState(false);
+  const [busy,setBusy] = useState(false);
+
+  const submit = async () => {
+    setMsg(""); setBusy(true);
+    if (!cur||!next||!conf) { setMsg("All fields are required."); setBusy(false); return; }
+    if (next.length<4) { setMsg("New password must be ≥ 4 characters."); setBusy(false); return; }
+    if (next!==conf)   { setMsg("New passwords do not match."); setBusy(false); return; }
+    const stored = await safeGet(ACCOUNT_PFX+username);
+    if (!stored) { setMsg("Account not found."); setBusy(false); return; }
+    const acct = JSON.parse(stored.value);
+    if (await hashPass(cur)!==acct.passwordHash) { setMsg("Current password is incorrect."); setBusy(false); return; }
+    await safeSet(ACCOUNT_PFX+username, JSON.stringify({...acct,passwordHash:await hashPass(next)}));
+    setOk(true); setMsg("✓ Password changed successfully!");
+    setBusy(false);
+  };
+
+  return (
+    <div className="modal-backdrop">
+      <div className="modal-card">
+        <div className="modal-title">🔑 Change Password</div>
+        {[{label:"Current Password",val:cur,set:setCur},{label:"New Password",val:next,set:setNext},{label:"Confirm New Password",val:conf,set:setConf}].map(f=>(
+          <div key={f.label} style={{marginBottom:"14px"}}>
+            <div className="auth-label">{f.label}</div>
+            <input className="auth-input" type="password" value={f.val}
+              onChange={e=>{f.set(e.target.value);setMsg("");}} disabled={ok}
+              onKeyDown={e=>e.key==="Enter"&&submit()} />
+          </div>
+        ))}
+        {msg && <div className={ok?"auth-success":"auth-error"}>{msg}</div>}
+        <div style={{display:"flex",gap:"12px",marginTop:"20px"}}>
+          {!ok && <button className="auth-submit" onClick={submit} disabled={busy} style={{flex:1}}>{busy?"Saving…":"Change Password"}</button>}
+          <button className="auth-submit" onClick={onClose} style={{flex:1,background:"linear-gradient(135deg,#3a2410,#5a3820)"}}>{ok?"Close":"Cancel"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   SETTINGS PANEL
+═══════════════════════════════════════════════════════════════════ */
+function SettingsPanel({ state, update, bgImage, setBgImage, bgImgKey }) {
+  const imgInputRef = useRef(null);
+  const [imgStatus, setImgStatus] = useState("");
+
+  const handleImageUpload = async (e) => {
+    const file = e.target.files?.[0]; e.target.value="";
+    if (!file||!file.type.startsWith("image/")) { setImgStatus("error"); return; }
+    setImgStatus("loading");
+    try {
+      let dataUrl = await resizeImage(file,1920,1080,0.82);
+      if (dataUrl.length>4_500_000) dataUrl = await resizeImage(file,1280,720,0.65);
+      if (dataUrl.length>4_500_000) { setImgStatus("toobig"); return; }
+      await safeSet(bgImgKey, dataUrl);
+      setBgImage(dataUrl);
+      update(d=>({...d,bgPreset:"image"}));
+      setImgStatus("saved");
+      setTimeout(()=>setImgStatus(""),3000);
+    } catch { setImgStatus("error"); }
+  };
+
+  const removeImage = async () => {
+    await safeDelete(bgImgKey);
+    setBgImage(null);
+    update(d=>({...d,bgPreset:"wheat"}));
+  };
+
+  return (
+    <div className="settings-panel">
+      <h3 className="settings-title">🎨 Appearance Settings</h3>
+      <div className="settings-label">Farm Background</div>
+      <div style={{display:"flex",flexWrap:"wrap",gap:"10px",marginTop:"10px"}}>
+        {Object.entries(BG_PRESETS).map(([key,{label}])=>(
+          <button key={key} onClick={()=>update(d=>({...d,bgPreset:key}))}
+            className={`bg-btn${state.bgPreset===key?" active":""}`}>{label}</button>
+        ))}
+        <button onClick={()=>update(d=>({...d,bgPreset:"custom"}))}
+          className={`bg-btn${state.bgPreset==="custom"?" active":""}`}>🎨 Custom</button>
+        {bgImage && (
+          <button onClick={()=>update(d=>({...d,bgPreset:"image"}))}
+            className={`bg-btn${state.bgPreset==="image"?" active":""}`}
+            style={bgImage?{backgroundImage:`url(${bgImage})`,backgroundSize:"cover",backgroundPosition:"center",color:"#fff",textShadow:"0 1px 4px rgba(0,0,0,0.9)"}:{}}>
+            🖼 My Photo
+          </button>
+        )}
+      </div>
+      {state.bgPreset==="custom" && (
+        <div style={{marginTop:"14px",display:"flex",alignItems:"center",gap:"14px"}}>
+          <span className="settings-label" style={{margin:0}}>Colour:</span>
+          <input type="color" value={state.bgCustom}
+            onChange={e=>update(d=>({...d,bgCustom:e.target.value}))}
+            style={{width:"50px",height:"36px",cursor:"pointer",border:"2px solid #C8941A",borderRadius:"5px",padding:"2px"}} />
+          <span style={{color:"#C8941A",fontFamily:"'Lora',serif",fontSize:"0.85rem"}}>{state.bgCustom}</span>
+        </div>
+      )}
+      <div style={{marginTop:"18px",display:"flex",alignItems:"flex-start",gap:"18px",flexWrap:"wrap"}}>
+        <div>
+          <div className="settings-label">Photo Background</div>
+          <div style={{display:"flex",gap:"10px",alignItems:"center",flexWrap:"wrap",marginTop:"8px"}}>
+            <button className="img-upload-btn" onClick={()=>imgInputRef.current?.click()}>
+              {bgImage?"🔄 Change Photo":"📷 Upload Photo"}
+            </button>
+            {bgImage && <button className="img-remove-btn" onClick={removeImage}>✕ Remove</button>}
+            <input ref={imgInputRef} type="file" accept="image/*" style={{display:"none"}} onChange={handleImageUpload} />
+            {imgStatus==="loading" && <span className="img-status loading">⏳ Compressing…</span>}
+            {imgStatus==="saved"   && <span className="img-status ok">✓ Saved!</span>}
+            {imgStatus==="toobig"  && <span className="img-status err">⚠ Too large even after compression.</span>}
+            {imgStatus==="error"   && <span className="img-status err">⚠ Upload failed.</span>}
+          </div>
+          <div style={{color:"rgba(255,248,220,0.38)",fontFamily:"'Lora',serif",fontSize:"0.75rem",fontStyle:"italic",marginTop:"8px"}}>
+            JPG · PNG · WEBP — auto-compressed · max ~4 MB
+          </div>
+        </div>
+        {bgImage && (
+          <div style={{position:"relative",flexShrink:0}}>
+            <img src={bgImage} alt="Background preview"
+              style={{width:"140px",height:"82px",objectFit:"cover",borderRadius:"7px",
+                border:"2px solid #C8941A",boxShadow:"0 4px 16px rgba(0,0,0,0.5)",display:"block"}} />
+            {state.bgPreset==="image" && (
+              <div style={{position:"absolute",top:"5px",right:"5px",background:"rgba(200,148,26,0.9)",
+                borderRadius:"4px",padding:"2px 6px",fontSize:"0.68rem",fontFamily:"'Lora',serif",color:"#3A1A00",fontWeight:"700"}}>
+                ACTIVE
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   GROUP CARD
+═══════════════════════════════════════════════════════════════════ */
+function GroupCard({ group, update }) {
+  const [editingTitle, setEditingTitle] = useState(false);
+
+  const upd     = fn => update(d=>({...d,groups:d.groups.map(g=>g.id===group.id?fn(g):g)}));
+  const delGrp  = () => { if(!window.confirm(`Delete group "${group.title}"?`)) return; update(d=>({...d,groups:d.groups.filter(g=>g.id!==group.id)})); };
+  const addRow  = ()         => upd(g=>({...g,rows:[...g.rows,{id:genId(),tagNr:"",micron:"",fleeceWeight:""}]}));
+  const delRow  = rid        => upd(g=>({...g,rows:g.rows.filter(r=>r.id!==rid)}));
+  const setCell = (rid,f,v)  => upd(g=>({...g,rows:g.rows.map(r=>r.id===rid?{...r,[f]:v}:r)}));
+
+  const c   = group.color||"#7A5230";
+  const cD  = shade(c,-0.35);
+  const cDD = shade(c,-0.55);
+  const [cr,cg,cb] = hexToRgb(c);
+  const rgb = `${cr},${cg},${cb}`;
+
+  return (
+    <div className="group-card" style={{border:`2px solid ${c}`,boxShadow:`0 8px 40px rgba(${rgb},0.40),0 0 0 1px ${cD},inset 0 1px 0 rgba(255,248,220,0.08)`}}>
+      {/* ── HEADER ── */}
+      <div className="group-header" style={{background:`linear-gradient(135deg,${cDD} 0%,${cD} 35%,${c} 70%,${shade(c,-0.1)} 100%)`,borderBottom:`3px solid ${shade(c,0.3)}`,boxShadow:`inset 0 -2px 12px rgba(0,0,0,0.28),0 3px 12px rgba(${rgb},0.3)`}}>
+        <button className="icon-btn" style={{borderColor:"rgba(255,248,220,0.35)"}}
+          onClick={()=>upd(g=>({...g,collapsed:!g.collapsed}))}>
+          {group.collapsed?"▶":"▼"}
+        </button>
+        {editingTitle
+          ? <input autoFocus className="title-edit-input" value={group.title}
+              onChange={e=>upd(g=>({...g,title:e.target.value}))}
+              onBlur={()=>setEditingTitle(false)}
+              onKeyDown={e=>{if(e.key==="Enter"||e.key==="Escape")setEditingTitle(false);}} />
+          : <span className="group-title-text" onClick={()=>setEditingTitle(true)}>
+              {group.title}<span style={{fontSize:"0.58rem",opacity:.65,marginLeft:"7px"}}>✏</span>
+            </span>
+        }
+        <div className="total-badge" style={{background:"rgba(0,0,0,0.40)",border:"1px solid rgba(255,248,220,0.28)"}}>
+          Total:&nbsp;<strong style={{fontSize:"1.05rem"}}>{group.rows.length}</strong>
+        </div>
+        <div style={{flex:1}}/>
+        <div style={{display:"flex",alignItems:"center",gap:"8px",flexShrink:0}}>
+          <span style={{color:"rgba(255,248,220,0.75)",fontFamily:"'Lora',serif",fontSize:"0.75rem",letterSpacing:"0.5px"}}>Group Colour:</span>
+          <input type="color" value={c} title="Change group colour"
+            onChange={e=>upd(g=>({...g,color:e.target.value}))}
+            style={{width:"34px",height:"28px",cursor:"pointer",border:"2px solid rgba(255,248,220,0.5)",borderRadius:"4px",padding:"1px",background:"none"}} />
+        </div>
+        <button className="delete-btn" onClick={delGrp}>✕ Delete</button>
+      </div>
+
+      {/* ── BODY ── */}
+      {!group.collapsed && (
+        <div style={{background:`linear-gradient(180deg,rgba(${rgb},0.10) 0px,rgba(255,248,220,0.95) 70px)`}}>
+          <div style={{overflowX:"auto"}}>
+            <table className="data-table">
+              <colgroup>
+                <col style={{minWidth:"160px"}}/><col style={{minWidth:"150px"}}/><col style={{minWidth:"180px"}}/><col style={{width:"50px"}}/>
+              </colgroup>
+              <thead>
+                <tr style={{background:`rgba(${rgb},0.15)`,borderBottom:`3px solid ${c}`}}>
+                  {["Tag Nr","Micron (µ)","Fleece Weight (kg)"].map(h=>(
+                    <th key={h} className="col-header"
+                      style={{color:cDD,borderRight:`1px solid rgba(${rgb},0.2)`,borderBottom:`3px solid ${c}`,textShadow:"0 1px 2px rgba(255,255,255,0.5)"}}>
+                      {h}
+                    </th>
+                  ))}
+                  <th style={{borderBottom:`3px solid ${c}`}}/>
+                </tr>
+                <tr style={{background:`rgba(${rgb},0.10)`,borderBottom:`1.5px dashed ${c}99`}}>
+                  <td className="avg-cell" style={{color:`rgba(${rgb},0.65)`,fontStyle:"italic"}}>Average ↓</td>
+                  <td className="avg-cell" style={{color:cDD,fontWeight:"700",fontSize:"1rem"}}>{numAvg(group.rows,"micron")}</td>
+                  <td className="avg-cell" style={{color:cDD,fontWeight:"700",fontSize:"1rem"}}>{numAvg(group.rows,"fleeceWeight")}</td>
+                  <td/>
+                </tr>
+              </thead>
+              <tbody>
+                {group.rows.length===0 && (
+                  <tr><td colSpan={4} style={{textAlign:"center",padding:"28px 20px",color:"#8B7355",fontStyle:"italic",fontFamily:"'Lora',serif",fontSize:"0.95rem"}}>
+                    No records yet — click "＋ Add Row" below
+                  </td></tr>
+                )}
+                {group.rows.map((row,i)=>(
+                  <tr key={row.id} className="data-row" style={{background:i%2===0?"rgba(255,255,255,0.65)":`rgba(${rgb},0.06)`}}>
+                    <td className="data-cell">
+                      <input className="cell-input tag-nr-input" value={row.tagNr}
+                        onChange={e=>setCell(row.id,"tagNr",e.target.value)} placeholder="Tag #" style={{color:cDD}}/>
+                    </td>
+                    <td className="data-cell">
+                      <input className="cell-input" type="number" step="0.1" min="0"
+                        value={row.micron} onChange={e=>setCell(row.id,"micron",e.target.value)} placeholder="0.0"/>
+                    </td>
+                    <td className="data-cell">
+                      <input className="cell-input" type="number" step="0.01" min="0"
+                        value={row.fleeceWeight} onChange={e=>setCell(row.id,"fleeceWeight",e.target.value)} placeholder="0.00"/>
+                    </td>
+                    <td style={{textAlign:"center",padding:"6px 8px"}}>
+                      <button onClick={()=>delRow(row.id)}
+                        style={{background:`rgba(${rgb},0.12)`,border:`1px solid ${c}66`,borderRadius:"4px",color:cD,cursor:"pointer",fontSize:"0.78rem",padding:"4px 8px",fontFamily:"'Lora',serif",transition:"all 0.15s"}}
+                        onMouseOver={e=>{e.currentTarget.style.background="rgba(140,30,30,0.22)";e.currentTarget.style.color="#8B1A1A";}}
+                        onMouseOut={e=>{e.currentTarget.style.background=`rgba(${rgb},0.12)`;e.currentTarget.style.color=cD;}}>✕</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div style={{padding:"14px 20px",borderTop:`1px solid rgba(${rgb},0.2)`}}>
+            <button onClick={addRow}
+              style={{background:`rgba(${rgb},0.08)`,border:`1.5px dashed ${c}`,borderRadius:"6px",color:cD,cursor:"pointer",fontFamily:"'Playfair Display',serif",fontSize:"0.95rem",fontWeight:"600",padding:"10px 0",width:"100%",transition:"background 0.2s",letterSpacing:"0.5px"}}
+              onMouseOver={e=>e.currentTarget.style.background=`rgba(${rgb},0.18)`}
+              onMouseOut={e=>e.currentTarget.style.background=`rgba(${rgb},0.08)`}>
+              ＋ Add Row
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   EXCEL / CSV IMPORT
+═══════════════════════════════════════════════════════════════════ */
+function handleImport(e, state, update, xlsxReady) {
+  const file=e.target.files?.[0]; if(!file) return;
+  e.target.value="";
+  const isCSV=file.name.toLowerCase().endsWith(".csv");
+  const reader=new FileReader();
+  reader.onload=(evt)=>{
+    try {
+      let rows=[];
+      const pick=(hdrs,...kws)=>hdrs.findIndex(h=>kws.some(k=>h.includes(k)));
+      if(!isCSV&&xlsxReady&&window.XLSX){
+        const wb=window.XLSX.read(evt.target.result,{type:"binary"});
+        const ws=wb.Sheets[wb.SheetNames[0]];
+        const json=window.XLSX.utils.sheet_to_json(ws,{header:1,defval:""});
+        const hdrs=(json[0]||[]).map(h=>String(h).toLowerCase().trim());
+        const ti=pick(hdrs,"tag"),mi=pick(hdrs,"micron"),fi=pick(hdrs,"fleece","weight");
+        for(let i=1;i<json.length;i++){
+          const r=json[i]; if(!r||r.join("").trim()==="") continue;
+          rows.push({id:genId(),tagNr:String(r[ti>=0?ti:0]??""),micron:String(r[mi>=0?mi:1]??""),fleeceWeight:String(r[fi>=0?fi:2]??"")});
+        }
+      } else {
+        const lines=evt.target.result.split(/\r?\n/);
+        const hdrs=lines[0].split(",").map(h=>h.replace(/"/g,"").toLowerCase().trim());
+        const ti=hdrs.findIndex(h=>h.includes("tag")),mi=hdrs.findIndex(h=>h.includes("micron")),fi=hdrs.findIndex(h=>h.includes("fleece")||h.includes("weight"));
+        for(let i=1;i<lines.length;i++){
+          const cols=lines[i].split(",").map(c=>c.replace(/"/g,"").trim()); if(cols.join("").trim()==="") continue;
+          rows.push({id:genId(),tagNr:cols[ti>=0?ti:0]??"",micron:cols[mi>=0?mi:1]??"",fleeceWeight:cols[fi>=0?fi:2]??""});
+        }
+      }
+      if(!rows.length){alert("⚠ No data rows found.");return;}
+      const g={id:genId(),title:file.name.replace(/\.[^.]+$/,""),color:GRP_COLORS[state.groups.length%GRP_COLORS.length],collapsed:false,rows};
+      update(d=>({...d,groups:[...d.groups,g]}));
+      alert(`✓ Imported ${rows.length} records as group "${g.title}"`);
+    } catch(err){alert("Import failed: "+err.message);}
+  };
+  if(!isCSV&&xlsxReady&&window.XLSX) reader.readAsBinaryString(file);
+  else reader.readAsText(file);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   ADMIN PANEL
+═══════════════════════════════════════════════════════════════════ */
+function AdminPanel({ adminUsername, onClose }) {
+  const [accounts, setAccounts]     = useState(null);
+  const [deleting, setDeleting]     = useState(null);
+  const [actionMsg, setActionMsg]   = useState({ text:"", ok:true });
+  const [sortBy, setSortBy]         = useState("date");
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  // Manual lookup
+  const [lookupInput, setLookupInput]   = useState("");
+  const [lookupResult, setLookupResult] = useState(null); // null | false | account obj
+  const [lookupBusy, setLookupBusy]     = useState(false);
+
+  const flash = (text, ok=true) => { setActionMsg({text,ok}); setTimeout(()=>setActionMsg({text:"",ok:true}), 4000); };
+
+  /* ── Load accounts from registry ── */
+  useEffect(() => {
+    (async () => {
+      setAccounts(null);
+      try {
+        const raw = await safeGet(REGISTRY_KEY);
+        const usernames = raw?.value ? JSON.parse(raw.value) : [];
+        const rows = await Promise.all(usernames.map(async uname => {
+          try {
+            const r = await safeGet(ACCOUNT_PFX + uname);
+            if (!r?.value) return null;
+            const data = JSON.parse(r.value);
+            const fraw = await safeGet(FARM_PFX + uname);
+            const farmName = fraw?.value ? JSON.parse(fraw.value).farmName || "" : "";
+            return { username:uname, email:data.email||"", createdAt:data.createdAt||0, farmName, isAdmin:isAdminUser(uname) };
+          } catch { return null; }
+        }));
+        setAccounts(rows.filter(Boolean));
+      } catch(e) { setAccounts([]); }
+    })();
+  }, [refreshKey]);
+
+  /* ── Delete an account (works for any username, registry or not) ── */
+  const doDelete = async (uname, removeFromList=true) => {
+    if (isAdminUser(uname)) { flash("⚠ Cannot delete the admin account.", false); return; }
+    if (!window.confirm(`Permanently delete "${uname}" and ALL their farm data?\n\nThis CANNOT be undone.`)) return;
+    setDeleting(uname);
+    try {
+      await safeDelete(ACCOUNT_PFX + uname);
+      await safeDelete(FARM_PFX    + uname);
+      await safeDelete(BGIMG_PFX   + uname);
+      await safeDelete(PRESENCE_PFX+ uname);
+      await registryRemove(uname);
+      flash(`✓ Account "${uname}" deleted successfully.`, true);
+      if (removeFromList) setAccounts(prev => prev ? prev.filter(a=>a.username!==uname) : prev);
+      setLookupResult(null);
+      setLookupInput("");
+    } catch(e) { flash("⚠ Delete failed: " + e.message, false); }
+    setDeleting(null);
+  };
+
+  /* ── Reset password ── */
+  const doResetPw = async (uname) => {
+    const newPw = window.prompt(`New temporary password for "${uname}" (min 4 chars):`);
+    if (newPw === null) return;
+    if (newPw.length < 4) { flash("⚠ Password too short (min 4 characters).", false); return; }
+    try {
+      const stored = await safeGet(ACCOUNT_PFX + uname);
+      if (!stored?.value) { flash(`⚠ Account "${uname}" not found.`, false); return; }
+      const acct = JSON.parse(stored.value);
+      await safeSet(ACCOUNT_PFX + uname, JSON.stringify({...acct, passwordHash: await hashPass(newPw)}));
+      flash(`✓ Password reset for "${uname}". Temp: ${newPw}`, true);
+    } catch(e) { flash("⚠ Reset failed: " + e.message, false); }
+  };
+
+  /* ── Manual username lookup ── */
+  const doLookup = async () => {
+    const u = lookupInput.trim().toLowerCase();
+    if (!u) return;
+    setLookupBusy(true); setLookupResult(null);
+    try {
+      const r = await safeGet(ACCOUNT_PFX + u);
+      if (!r?.value) { setLookupResult(false); setLookupBusy(false); return; }
+      const data = JSON.parse(r.value);
+      const fraw = await safeGet(FARM_PFX + u);
+      const farmName = fraw?.value ? JSON.parse(fraw.value).farmName || "" : "";
+      // Auto-add to registry so it shows up in the list next time
+      await registryAdd(u);
+      setLookupResult({ username:u, email:data.email||"", createdAt:data.createdAt||0, farmName, isAdmin:isAdminUser(u) });
+      // Also add to local accounts list if not already there
+      setAccounts(prev => {
+        if (!prev || prev.find(a=>a.username===u)) return prev;
+        return [...prev, { username:u, email:data.email||"", createdAt:data.createdAt||0, farmName, isAdmin:isAdminUser(u) }];
+      });
+    } catch(e) { setLookupResult(false); }
+    setLookupBusy(false);
+  };
+
+  const sorted = (accounts||[]).sort((a,b) => sortBy==="date" ? b.createdAt-a.createdAt : a.username.localeCompare(b.username));
+  const fmt = ts => ts ? new Date(ts).toLocaleDateString("en-ZA",{day:"2-digit",month:"short",year:"numeric"}) + "  " + new Date(ts).toLocaleTimeString("en-ZA",{hour:"2-digit",minute:"2-digit"}) : "—";
+
+  return (
+    <div className="modal-backdrop">
+      <div className="modal-card" style={{maxWidth:"700px",padding:"30px 34px"}}>
+
+        {/* ── Header ── */}
+        <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:"20px"}}>
+          <div>
+            <div style={{display:"flex",alignItems:"center",gap:"10px",marginBottom:"4px"}}>
+              <span style={{color:"#FFF8DC",fontFamily:"'Playfair Display',serif",fontSize:"1.4rem",fontWeight:"700"}}>🛡 Admin Panel</span>
+              <span style={{background:"rgba(200,148,26,0.25)",border:"1px solid #C8941A",borderRadius:"20px",padding:"3px 12px",fontSize:"0.72rem",fontFamily:"'Lora',serif",color:"#C8941A",letterSpacing:"1px"}}>
+                {adminUsername}
+              </span>
+            </div>
+            <div style={{color:"rgba(255,248,220,0.38)",fontFamily:"'Lora',serif",fontSize:"0.8rem"}}>
+              Manage all farm accounts
+            </div>
+          </div>
+          <button onClick={onClose} style={{background:"none",border:"none",color:"rgba(255,248,220,0.4)",cursor:"pointer",fontSize:"1.4rem",lineHeight:1,padding:"0 4px"}}>✕</button>
+        </div>
+
+        {/* ── Flash message ── */}
+        {actionMsg.text && (
+          <div style={{background:actionMsg.ok?"rgba(30,120,30,0.25)":"rgba(180,30,30,0.25)",
+            border:`1px solid ${actionMsg.ok?"rgba(80,200,80,0.4)":"rgba(220,80,80,0.4)"}`,
+            borderRadius:"7px",padding:"10px 16px",marginBottom:"16px",
+            color:actionMsg.ok?"#B8FFB8":"#FFB8B8",fontFamily:"'Lora',serif",fontSize:"0.88rem"}}>
+            {actionMsg.text}
+          </div>
+        )}
+
+        {/* ── Stats ── */}
+        {accounts && (
+          <div style={{display:"flex",gap:"10px",marginBottom:"20px",flexWrap:"wrap"}}>
+            {[
+              {icon:"👤",val:accounts.length,label:"Total Accounts"},
+              {icon:"🌾",val:accounts.filter(a=>a.farmName).length,label:"With Farm Data"},
+              {icon:"🆕",val:accounts.filter(a=>a.createdAt>Date.now()-86400000).length,label:"Joined Today"},
+            ].map(s=>(
+              <div key={s.label} style={{flex:1,minWidth:"110px",background:"rgba(200,148,26,0.10)",border:"1px solid rgba(200,148,26,0.28)",borderRadius:"8px",padding:"11px 14px",textAlign:"center"}}>
+                <div style={{fontSize:"1.4rem"}}>{s.icon}</div>
+                <div style={{color:"#FFF8DC",fontFamily:"'Playfair Display',serif",fontSize:"1.6rem",fontWeight:"700",lineHeight:1.1}}>{s.val}</div>
+                <div style={{color:"rgba(255,248,220,0.4)",fontFamily:"'Lora',serif",fontSize:"0.72rem",marginTop:"2px"}}>{s.label}</div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* ── Manual lookup ── */}
+        <div style={{background:"rgba(255,248,220,0.05)",border:"1px solid rgba(200,148,26,0.28)",borderRadius:"8px",padding:"14px 16px",marginBottom:"18px"}}>
+          <div style={{color:"#C8941A",fontFamily:"'Playfair Display',serif",fontSize:"0.75rem",letterSpacing:"1.5px",textTransform:"uppercase",marginBottom:"10px"}}>
+            🔍 Find Account by Username
+          </div>
+          <div style={{display:"flex",gap:"8px",marginBottom:"10px"}}>
+            <input className="auth-input" value={lookupInput} placeholder="Type exact username…"
+              onChange={e=>{setLookupInput(e.target.value);setLookupResult(null);}}
+              onKeyDown={e=>e.key==="Enter"&&doLookup()}
+              style={{flex:1,margin:0,padding:"9px 13px",fontSize:"0.9rem"}} />
+            <button onClick={doLookup} disabled={lookupBusy||!lookupInput.trim()}
+              style={{background:"linear-gradient(135deg,#5C3A18,#7A5230)",border:"2px solid #C8941A",borderRadius:"6px",
+                color:"#FFF8DC",cursor:"pointer",fontFamily:"'Playfair Display',serif",fontSize:"0.88rem",
+                fontWeight:"600",padding:"9px 18px",whiteSpace:"nowrap",opacity:lookupInput.trim()?1:0.5}}>
+              {lookupBusy?"…":"Look Up"}
+            </button>
+          </div>
+          {lookupResult===false && (
+            <div style={{color:"#FFB8B8",fontFamily:"'Lora',serif",fontSize:"0.84rem",fontStyle:"italic"}}>
+              ⚠ No account found for "{lookupInput}"
+            </div>
+          )}
+          {lookupResult && (
+            <AccountRow account={lookupResult} deleting={deleting} onDelete={doDelete} onResetPw={doResetPw} fmt={fmt} highlight />
+          )}
+        </div>
+
+        {/* ── Account list ── */}
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:"10px",flexWrap:"wrap",gap:"8px"}}>
+          <div style={{color:"#C8941A",fontFamily:"'Playfair Display',serif",fontSize:"0.75rem",letterSpacing:"1.5px",textTransform:"uppercase"}}>
+            Registered Accounts
+          </div>
+          <div style={{display:"flex",gap:"6px"}}>
+            {["date","name"].map(s=>(
+              <button key={s} onClick={()=>setSortBy(s)}
+                style={{background:sortBy===s?"rgba(200,148,26,0.25)":"rgba(255,255,255,0.05)",
+                  border:`1px solid ${sortBy===s?"#C8941A":"rgba(200,148,26,0.22)"}`,
+                  borderRadius:"5px",color:sortBy===s?"#C8941A":"rgba(255,248,220,0.45)",
+                  cursor:"pointer",fontFamily:"'Lora',serif",fontSize:"0.78rem",padding:"6px 11px"}}>
+                {s==="date"?"📅 Newest":"🔤 A–Z"}
+              </button>
+            ))}
+            <button onClick={()=>setRefreshKey(k=>k+1)} title="Refresh list"
+              style={{background:"rgba(255,255,255,0.05)",border:"1px solid rgba(200,148,26,0.22)",
+                borderRadius:"5px",color:"rgba(255,248,220,0.45)",cursor:"pointer",padding:"6px 10px",fontSize:"0.9rem"}}>
+              🔄
+            </button>
+          </div>
+        </div>
+
+        <div style={{borderRadius:"8px",border:"1px solid rgba(200,148,26,0.2)",overflow:"hidden",maxHeight:"360px",overflowY:"auto"}}>
+          {accounts===null ? (
+            <div style={{textAlign:"center",padding:"36px",color:"#C8941A",fontFamily:"'Lora',serif",fontStyle:"italic"}}>⏳ Loading…</div>
+          ) : sorted.length===0 ? (
+            <div style={{textAlign:"center",padding:"36px",color:"rgba(255,248,220,0.35)",fontFamily:"'Lora',serif",fontStyle:"italic"}}>
+              No accounts in registry yet.<br/>Use the lookup above to find users by username.
+            </div>
+          ) : (
+            <table style={{width:"100%",borderCollapse:"collapse"}}>
+              <thead>
+                <tr style={{background:"rgba(200,148,26,0.15)",borderBottom:"2px solid rgba(200,148,26,0.3)",position:"sticky",top:0,zIndex:2}}>
+                  {["User","Email","Farm Name","Registered","Role","Actions"].map(h=>(
+                    <th key={h} style={{padding:"10px 14px",textAlign:"left",color:"#C8941A",
+                      fontFamily:"'Playfair Display',serif",fontSize:"0.8rem",fontWeight:"700",letterSpacing:"0.5px",whiteSpace:"nowrap"}}>
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {sorted.map((a,i)=>(
+                  <AccountRow key={a.username} account={a} deleting={deleting} onDelete={doDelete} onResetPw={doResetPw} fmt={fmt} zebra={i%2===0} />
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        <div style={{marginTop:"12px",color:"rgba(255,248,220,0.25)",fontFamily:"'Lora',serif",fontSize:"0.74rem",fontStyle:"italic",textAlign:"center",lineHeight:1.6}}>
+          Accounts only appear in the list after their first login post-update. Use "Find Account" to locate older accounts by username.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* Row used in both table and lookup result */
+function AccountRow({ account:a, deleting, onDelete, onResetPw, fmt, highlight=false, zebra=false }) {
+  const isTable = !highlight;
+  const rowBg = highlight
+    ? "rgba(200,148,26,0.12)"
+    : zebra ? "rgba(255,255,255,0.04)" : "rgba(255,255,255,0.015)";
+
+  const avatar = (
+    <div style={{width:"28px",height:"28px",borderRadius:"50%",display:"flex",alignItems:"center",
+      justifyContent:"center",fontSize:"0.68rem",fontWeight:"700",fontFamily:"'Playfair Display',serif",flexShrink:0,
+      background:a.isAdmin?"linear-gradient(135deg,#8B6914,#C8941A)":"linear-gradient(135deg,#2A4A6A,#1A3A6A)",
+      color:a.isAdmin?"#3A1A00":"#B0D0FF",
+      border:a.isAdmin?"2px solid #C8941A":"2px solid #4A7ABE"}}>
+      {a.username.slice(0,2).toUpperCase()}
+    </div>
+  );
+
+  const cells = [
+    <td key="user" style={{padding:"10px 14px"}}>
+      <div style={{display:"flex",alignItems:"center",gap:"8px"}}>
+        {avatar}
+        <span style={{color:"#FFF8DC",fontFamily:"'Playfair Display',serif",fontSize:"0.9rem",fontWeight:"600"}}>{a.username}</span>
+      </div>
+    </td>,
+    <td key="email" style={{padding:"10px 14px",color:"rgba(255,248,220,0.65)",fontFamily:"'Lora',serif",fontSize:"0.82rem"}}>
+      {a.email || <span style={{opacity:.3,fontStyle:"italic"}}>—</span>}
+    </td>,
+    <td key="farm" style={{padding:"10px 14px",color:"rgba(255,248,220,0.65)",fontFamily:"'Lora',serif",fontSize:"0.86rem"}}>
+      {a.farmName||<span style={{opacity:.35,fontStyle:"italic"}}>—</span>}
+    </td>,
+    <td key="date" style={{padding:"10px 14px",color:"rgba(255,248,220,0.42)",fontFamily:"'Lora',serif",fontSize:"0.78rem",whiteSpace:"nowrap"}}>
+      {fmt(a.createdAt)}
+    </td>,
+    <td key="role" style={{padding:"10px 14px"}}>
+      {a.isAdmin
+        ? <span style={{background:"rgba(200,148,26,0.3)",border:"1px solid #C8941A",borderRadius:"12px",padding:"2px 10px",color:"#C8941A",fontFamily:"'Lora',serif",fontSize:"0.72rem",fontWeight:"700"}}>ADMIN</span>
+        : <span style={{background:"rgba(255,255,255,0.07)",border:"1px solid rgba(255,255,255,0.13)",borderRadius:"12px",padding:"2px 10px",color:"rgba(255,248,220,0.4)",fontFamily:"'Lora',serif",fontSize:"0.72rem"}}>Member</span>
+      }
+    </td>,
+    <td key="actions" style={{padding:"8px 12px"}}>
+      <div style={{display:"flex",gap:"6px",alignItems:"center"}}>
+        <button onClick={()=>onResetPw(a.username)}
+          style={{background:"rgba(200,148,26,0.15)",border:"1px solid rgba(200,148,26,0.4)",borderRadius:"5px",
+            color:"#C8941A",cursor:"pointer",fontFamily:"'Lora',serif",fontSize:"0.75rem",padding:"5px 9px",whiteSpace:"nowrap",transition:"background 0.15s"}}
+          onMouseOver={e=>e.currentTarget.style.background="rgba(200,148,26,0.3)"}
+          onMouseOut={e=>e.currentTarget.style.background="rgba(200,148,26,0.15)"}>
+          🔑 Reset PW
+        </button>
+        {!a.isAdmin && (
+          <button
+            onClick={()=>onDelete(a.username)}
+            disabled={deleting===a.username}
+            style={{background:"rgba(140,20,20,0.55)",border:"1px solid rgba(220,60,60,0.5)",borderRadius:"5px",
+              color:"#FFB0B0",cursor:deleting===a.username?"not-allowed":"pointer",fontFamily:"'Lora',serif",
+              fontSize:"0.75rem",padding:"5px 10px",fontWeight:"600",transition:"background 0.15s",
+              opacity:deleting===a.username?0.5:1}}
+            onMouseOver={e=>{if(deleting!==a.username)e.currentTarget.style.background="rgba(190,30,30,0.75)";}}
+            onMouseOut={e=>e.currentTarget.style.background="rgba(140,20,20,0.55)"}>
+            {deleting===a.username ? "Deleting…" : "✕ Delete"}
+          </button>
+        )}
+      </div>
+    </td>
+  ];
+
+  if (highlight) {
+    return (
+      <div style={{background:rowBg,border:"1px solid rgba(200,148,26,0.35)",borderRadius:"7px",padding:"4px 0",overflow:"hidden"}}>
+        <table style={{width:"100%",borderCollapse:"collapse"}}><tbody><tr>{cells}</tr></tbody></table>
+      </div>
+    );
+  }
+  return <tr style={{background:rowBg,borderBottom:"1px solid rgba(200,148,26,0.10)",transition:"background 0.12s"}}>{cells}</tr>;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   GLOBAL CSS
+═══════════════════════════════════════════════════════════════════ */
+const CSS_GLOBAL = `
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:'Lora',Georgia,serif;}
+
+  .grain-overlay{position:fixed;inset:0;pointer-events:none;z-index:0;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='250' height='250'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='250' height='250' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");opacity:.55;}
+
+  /* ── AUTH ── */
+  .auth-bg{min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(175deg,#4A88C2 0%,#7BBDE0 16%,#F0D898 36%,#D4A018 50%,#B88010 65%,#806010 82%,#503808 100%);position:relative;padding:30px 16px;overflow:hidden;}
+  .auth-deco{position:absolute;top:50%;transform:translateY(-50%);font-size:5rem;opacity:.15;pointer-events:none;user-select:none;filter:drop-shadow(0 4px 8px rgba(0,0,0,0.4));}
+  .auth-deco.left{left:3%;} .auth-deco.right{right:3%;transform:translateY(-50%) scaleX(-1);}
+  .auth-card{position:relative;z-index:1;background:rgba(18,8,2,0.94);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border:2px solid #C8941A;border-radius:16px;width:100%;max-width:450px;padding:42px 44px 36px;box-shadow:0 24px 80px rgba(0,0,0,0.7),0 0 0 1px rgba(200,148,26,0.22),inset 0 1px 0 rgba(255,248,220,0.06);}
+  .auth-logo{text-align:center;margin-bottom:18px;}
+  .auth-logo-icon{font-size:3rem;margin-bottom:8px;filter:drop-shadow(0 3px 8px rgba(200,148,26,0.4));}
+  .auth-logo-eyebrow{color:#C8941A;font-family:'Playfair Display',serif;font-size:0.6rem;letter-spacing:5px;text-transform:uppercase;opacity:.9;margin-bottom:8px;}
+  .auth-logo-title{color:#FFF8DC;font-family:'Playfair Display',serif;font-size:2.2rem;font-weight:700;text-shadow:0 2px 12px rgba(0,0,0,0.5);line-height:1.1;}
+  .auth-logo-sub{color:rgba(255,248,220,0.45);font-family:'Lora',serif;font-size:0.85rem;font-style:italic;margin-top:6px;}
+  .auth-divider{text-align:center;color:#C8941A;font-size:0.9rem;margin:18px 0;opacity:.6;}
+  .auth-tabs{display:flex;border:1px solid rgba(200,148,26,0.38);border-radius:8px;overflow:hidden;margin-bottom:26px;}
+  .auth-tab{flex:1;background:transparent;border:none;color:rgba(255,248,220,0.45);cursor:pointer;font-family:'Playfair Display',serif;font-size:0.94rem;font-weight:600;padding:11px;transition:all 0.2s;letter-spacing:0.3px;}
+  .auth-tab.active{background:linear-gradient(135deg,#5C3A18,#7A5230);color:#FFF8DC;box-shadow:inset 0 1px 0 rgba(255,248,220,0.12);}
+  .auth-tab:hover:not(.active){color:#FFF8DC;background:rgba(255,248,220,0.06);}
+  .auth-fields{display:flex;flex-direction:column;gap:4px;}
+  .auth-label{color:#C8941A;font-family:'Playfair Display',serif;font-size:0.7rem;letter-spacing:2px;text-transform:uppercase;margin-top:14px;margin-bottom:5px;display:block;}
+  .auth-input{background:rgba(255,248,220,0.07);border:1px solid rgba(200,148,26,0.38);border-radius:6px;color:#FFF8DC;font-family:'Lora',serif;font-size:0.96rem;padding:11px 15px;outline:none;transition:border-color 0.2s,background 0.2s;width:100%;}
+  .auth-input:focus{border-color:#C8941A;background:rgba(255,248,220,0.12);}
+  .auth-input::placeholder{color:rgba(255,248,220,0.28);}
+  .auth-error{background:rgba(180,30,30,0.22);border:1px solid rgba(220,80,80,0.4);border-radius:6px;color:#FFB8B8;font-family:'Lora',serif;font-size:0.86rem;margin-top:12px;padding:10px 14px;line-height:1.5;}
+  .auth-success{background:rgba(30,120,30,0.22);border:1px solid rgba(80,200,80,0.4);border-radius:6px;color:#B8FFB8;font-family:'Lora',serif;font-size:0.86rem;margin-top:12px;padding:10px 14px;}
+  .auth-submit{background:linear-gradient(135deg,#7A5230,#9A6A3A);border:2px solid #C8941A;border-radius:8px;color:#FFF8DC;cursor:pointer;font-family:'Playfair Display',serif;font-size:1rem;font-weight:700;padding:13px;margin-top:18px;transition:all 0.2s;letter-spacing:0.5px;width:100%;box-shadow:0 4px 14px rgba(0,0,0,0.35);}
+  .auth-submit:hover:not(:disabled){background:linear-gradient(135deg,#9A6A3A,#BA8A4A);transform:translateY(-1px);box-shadow:0 6px 20px rgba(0,0,0,0.45);}
+  .auth-submit:disabled{opacity:.5;cursor:not-allowed;}
+  .auth-footer{color:rgba(255,248,220,0.32);font-family:'Lora',serif;font-size:0.76rem;font-style:italic;margin-top:22px;text-align:center;line-height:1.7;}
+
+  /* ── COLLABORATION BANNER ── */
+  .collab-banner{position:relative;z-index:19;background:linear-gradient(90deg,#1A3A6A,#2A5A9A,#1A3A6A);border-bottom:2px solid #6AAAD4;padding:9px 32px;display:flex;align-items:center;gap:16px;color:#C8EAFF;font-family:'Lora',serif;font-size:0.9rem;box-shadow:0 3px 12px rgba(0,0,0,0.4);}
+  .collab-leave-btn{background:rgba(255,255,255,0.15);border:1px solid rgba(200,230,255,0.4);border-radius:5px;color:#C8EAFF;cursor:pointer;font-family:'Lora',serif;font-size:0.82rem;padding:5px 12px;transition:background 0.15s;margin-left:auto;}
+  .collab-leave-btn:hover{background:rgba(255,255,255,0.25);}
+
+  /* ── PRESENCE ── */
+  .presence-row{display:flex;align-items:center;gap:6px;flex-shrink:0;}
+  .presence-dot{width:30px;height:30px;border-radius:"50%";border-radius:50%;display:flex;align-items:center;justify-content:center;font-family:'Playfair Display',serif;font-size:0.68rem;font-weight:700;cursor:default;border:2px solid rgba(255,248,220,0.5);transition:transform 0.2s;}
+  .presence-dot:hover{transform:scale(1.15);}
+  .presence-dot.self{background:linear-gradient(135deg,#5C7A30,#3A5A18);color:#D8F8B0;border-color:#90C850;}
+  .presence-dot:not(.self){background:linear-gradient(135deg,#2A4A7A,#1A3A6A);color:#B0D0FF;border-color:#6090D0;}
+  .presence-label{color:rgba(255,248,220,0.65);font-family:'Lora',serif;font-size:0.78rem;font-style:italic;white-space:nowrap;}
+
+  /* ── MODAL ── */
+  .modal-backdrop{position:fixed;inset:0;z-index:50;background:rgba(0,0,0,0.72);backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;padding:20px;}
+  .modal-card{background:rgba(18,8,2,0.97);border:2px solid #C8941A;border-radius:13px;max-width:400px;width:100%;padding:36px 38px;box-shadow:0 24px 70px rgba(0,0,0,0.75);max-height:90vh;overflow-y:auto;}
+  .modal-title{color:#FFF8DC;font-family:'Playfair Display',serif;font-size:1.3rem;font-weight:700;margin-bottom:20px;}
+
+  /* ── FARM SWITCHER ── */
+  .farm-section-label{color:#C8941A;font-family:'Playfair Display',serif;font-size:0.72rem;letter-spacing:2px;text-transform:uppercase;margin-bottom:8px;}
+  .farm-row{display:flex;align-items:center;gap:12px;background:rgba(255,248,220,0.06);border:1px solid rgba(200,148,26,0.25);border-radius:8px;padding:12px 16px;cursor:pointer;transition:all 0.2s;margin-bottom:8px;}
+  .farm-row:hover{background:rgba(255,248,220,0.12);border-color:rgba(200,148,26,0.5);}
+  .farm-row-active{background:rgba(200,148,26,0.18)!important;border-color:#C8941A!important;box-shadow:0 0 12px rgba(200,148,26,0.3);}
+  .farm-row-icon{font-size:1.5rem;flex-shrink:0;}
+  .farm-row-name{color:#FFF8DC;font-family:'Playfair Display',serif;font-size:1rem;font-weight:600;}
+  .farm-row-sub{color:rgba(255,248,220,0.45);font-family:'Lora',serif;font-size:0.8rem;margin-top:2px;}
+  .farm-row-badge{margin-left:auto;background:rgba(200,148,26,0.8);color:#3A1A00;font-family:'Lora',serif;font-size:0.72rem;font-weight:700;padding:3px 10px;border-radius:12px;white-space:nowrap;flex-shrink:0;}
+
+  /* ── NAVBAR ── */
+  .navbar{position:relative;z-index:20;background:rgba(22,12,4,0.93);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border-bottom:3px solid #C8941A;padding:16px 32px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:14px;box-shadow:0 4px 20px rgba(0,0,0,0.5);}
+  .navbar-eyebrow{color:#C8941A;font-family:'Playfair Display',serif;font-size:0.62rem;letter-spacing:5px;text-transform:uppercase;margin-bottom:5px;opacity:.9;}
+  .farm-name-input{background:transparent;border:none;border-bottom:1.5px solid rgba(200,148,26,0.45);color:#FFF8DC;font-family:'Playfair Display',serif;font-size:2rem;font-weight:700;width:320px;padding:2px 6px;outline:none;transition:border-color 0.2s;}
+  .farm-name-input:focus{border-bottom-color:#C8941A;}
+  .farm-name-input::placeholder{color:rgba(255,248,220,0.35);}
+  .navbar-right{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+  .save-indicator{font-family:'Lora',serif;font-size:0.82rem;min-width:80px;text-align:right;}
+  .search-input{background:rgba(255,248,220,0.10);border:1px solid rgba(200,148,26,0.4);border-radius:6px;color:#FFF8DC;font-family:'Lora',serif;font-size:0.88rem;padding:9px 14px;width:185px;outline:none;transition:border-color 0.2s;}
+  .search-input::placeholder{color:rgba(255,248,220,0.45);}
+  .search-input:focus{border-color:#C8941A;background:rgba(255,248,220,0.14);}
+  .nav-btn{font-family:'Playfair Display',serif;font-size:0.88rem;font-weight:600;background:linear-gradient(135deg,#5C3A18,#7A5230);color:#FFF8DC;border:2px solid #C8941A;padding:8px 16px;border-radius:5px;cursor:pointer;transition:all 0.2s;white-space:nowrap;letter-spacing:0.3px;box-shadow:0 2px 8px rgba(0,0,0,0.3);}
+  .nav-btn:hover{background:linear-gradient(135deg,#7A5230,#9A6A3A);transform:translateY(-1px);box-shadow:0 4px 14px rgba(0,0,0,0.4);}
+  .collab-btn{background:linear-gradient(135deg,#1A3A6A,#2A5A9A)!important;border-color:#6AAAD4!important;}
+  .collab-btn:hover{background:linear-gradient(135deg,#2A5A9A,#3A7ABA)!important;}
+  .admin-btn{background:linear-gradient(135deg,#5C3A00,#8B6914)!important;border-color:#C8941A!important;}
+  .admin-btn:hover{background:linear-gradient(135deg,#8B6914,#B89028)!important;}
+  .user-pill{display:flex;align-items:center;border:1.5px solid rgba(200,148,26,0.45);border-radius:6px;overflow:hidden;}
+  .user-pill-name{color:#FFF8DC;font-family:'Lora',serif;font-size:0.85rem;padding:7px 12px;background:rgba(255,248,220,0.06);white-space:nowrap;border-right:1px solid rgba(200,148,26,0.3);}
+  .user-pill-btn{background:rgba(255,248,220,0.08);border:none;cursor:pointer;padding:7px 10px;transition:background 0.15s;border-right:1px solid rgba(200,148,26,0.3);}
+  .key-btn{color:#C8941A;font-size:0.9rem;} .key-btn:hover{background:rgba(200,148,26,0.2);}
+  .logout-btn{color:#FFD0D0;font-family:'Lora',serif;font-size:0.82rem;background:rgba(120,30,30,0.5);padding:7px 12px;white-space:nowrap;}
+  .logout-btn:hover{background:rgba(160,40,40,0.75);}
+
+  /* ── SETTINGS ── */
+  .settings-panel{position:relative;z-index:15;background:rgba(22,12,4,0.95);border-bottom:2px solid #8B6914;padding:22px 32px;box-shadow:0 6px 20px rgba(0,0,0,0.4);}
+  .settings-title{color:#C8941A;font-family:'Playfair Display',serif;font-size:1.1rem;font-weight:700;margin-bottom:16px;}
+  .settings-label{color:#C8941A;font-family:'Playfair Display',serif;font-size:0.75rem;letter-spacing:1.5px;text-transform:uppercase;display:block;margin-bottom:6px;}
+  .bg-btn{padding:8px 14px;border-radius:6px;cursor:pointer;font-family:'Lora',serif;font-size:0.82rem;border:1px solid rgba(200,148,26,0.35);background:rgba(255,255,255,0.08);color:#FFF8DC;outline:none;transition:all 0.2s;}
+  .bg-btn.active{border:2px solid #C8941A;background:rgba(200,148,26,0.25);box-shadow:0 0 12px rgba(200,148,26,0.35);}
+  .bg-btn:hover{background:rgba(200,148,26,0.15);}
+  .img-upload-btn{font-family:'Playfair Display',serif;font-size:0.88rem;font-weight:600;background:linear-gradient(135deg,#2A4A6A,#3A6A9A);color:#FFF8DC;border:2px solid #6AAAD4;padding:9px 18px;border-radius:6px;cursor:pointer;transition:all 0.2s;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,0.3);}
+  .img-upload-btn:hover{background:linear-gradient(135deg,#3A6A9A,#4A8ABA);transform:translateY(-1px);}
+  .img-remove-btn{font-family:'Lora',serif;font-size:0.84rem;background:rgba(120,30,30,0.55);color:#FFD0D0;border:1px solid rgba(200,80,80,0.5);padding:9px 14px;border-radius:6px;cursor:pointer;transition:all 0.2s;}
+  .img-remove-btn:hover{background:rgba(160,40,40,0.8);}
+  .img-status{font-family:'Lora',serif;font-size:0.82rem;font-style:italic;}
+  .img-status.loading{color:#F0C060;} .img-status.ok{color:#90D890;} .img-status.err{color:#FF9090;max-width:260px;}
+
+  /* ── MAIN ── */
+  .main-content{position:relative;z-index:1;padding:30px 32px 70px;}
+  .add-group-btn{margin-bottom:26px;font-size:1rem;padding:11px 26px;}
+  .empty-state{text-align:center;color:rgba(255,248,220,0.8);font-family:'Playfair Display',serif;font-size:1.25rem;padding:70px 0;text-shadow:1px 1px 6px rgba(0,0,0,0.6);}
+
+  /* ── GROUP CARD ── */
+  .group-card{border-radius:10px;overflow:hidden;transition:box-shadow 0.3s,transform 0.2s;}
+  .group-card:hover{transform:translateY(-1px);}
+  .group-header{padding:14px 20px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;min-height:62px;}
+  .icon-btn{background:rgba(255,248,220,0.15);border:1px solid;border-radius:4px;color:#FFF8DC;cursor:pointer;font-size:0.9rem;padding:5px 11px;flex-shrink:0;transition:background 0.2s;font-family:'Lora',serif;}
+  .icon-btn:hover{background:rgba(255,248,220,0.28);}
+  .group-title-text{font-family:'Playfair Display',serif;font-size:1.45rem;font-weight:700;color:#FFF8DC;cursor:pointer;text-shadow:1px 2px 8px rgba(0,0,0,0.55);user-select:none;flex-shrink:0;transition:opacity 0.2s;}
+  .group-title-text:hover{opacity:.85;}
+  .title-edit-input{background:rgba(255,255,255,0.18);border:1.5px solid rgba(255,248,220,0.65);border-radius:5px;color:#FFF8DC;font-family:'Playfair Display',serif;font-size:1.35rem;font-weight:700;padding:5px 14px;outline:none;flex-shrink:0;min-width:220px;}
+  .total-badge{border-radius:24px;padding:5px 18px;color:#FFF8DC;font-family:'Playfair Display',serif;font-size:0.92rem;flex-shrink:0;text-shadow:1px 1px 4px rgba(0,0,0,0.45);letter-spacing:0.3px;}
+  .delete-btn{background:rgba(100,18,18,0.65);border:1px solid rgba(180,60,60,0.5);border-radius:4px;color:#FFD8D8;cursor:pointer;font-family:'Lora',serif;font-size:0.82rem;padding:6px 13px;transition:all 0.2s;flex-shrink:0;}
+  .delete-btn:hover{background:rgba(150,25,25,0.85);color:#fff;}
+
+  /* ── TABLE ── */
+  .data-table{width:100%;border-collapse:collapse;}
+  .col-header{padding:16px 22px;font-family:'Playfair Display',serif;font-size:1.15rem;font-weight:700;text-align:center;letter-spacing:0.3px;}
+  .avg-cell{padding:10px 22px;text-align:center;font-family:'Lora',serif;font-size:0.92rem;border-right:1px solid rgba(139,105,20,0.15);}
+  .data-row{border-bottom:1px solid rgba(139,105,20,0.13);transition:filter 0.12s;}
+  .data-row:hover{filter:brightness(0.96);}
+  .data-cell{padding:8px 14px;border-right:1px solid rgba(139,105,20,0.12);}
+  .cell-input{background:transparent;border:none;border-bottom:1px solid rgba(139,105,20,0.28);text-align:center;font-family:'Lora',serif;font-size:0.95rem;width:100%;padding:5px 6px;color:#3D2B1F;outline:none;transition:border-color 0.2s;}
+  .cell-input:focus{border-bottom:1.5px solid #C8941A;}
+  .cell-input::placeholder{color:rgba(61,43,31,0.35);}
+  .cell-input::-webkit-inner-spin-button{opacity:.4;}
+  .tag-nr-input{font-family:'Playfair Display',serif!important;font-size:1.18rem!important;font-weight:700!important;}
+
+  @media(max-width:700px){
+    .navbar{padding:14px 16px;} .farm-name-input{font-size:1.4rem;width:180px;}
+    .main-content{padding:20px 12px 50px;} .group-header{padding:12px 14px;}
+    .auth-card{padding:28px 20px 24px;} .auth-deco{display:none;}
+    .modal-card{padding:24px 18px;}
+  }
+`;
+
+ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
+  </script>
+  <script>
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("/sw.js").catch(() => {});
+    }
+  </script>
+</body>
+</html>
